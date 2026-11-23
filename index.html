@@ -15,6 +15,7 @@
 <canvas id="wind"></canvas>
 <svg id="rings"></svg>
 <div id="pings"><div id="probe" class="probe"><div class="pdot"></div><div id="probeCard" class="pcard"></div></div></div>
+<div class="geoTip mono" id="geoTip"></div>
 
 <nav>
  <div class="logo"><i></i>TERRA</div>
@@ -23,14 +24,27 @@
 </nav>
 
 <section class="left" id="left">
- <div class="eyebrow mono">// INTERACTIVE EARTH ARCHIVE</div>
- <h1>See the world<br>change, <span>day<br>by day.</span></h1>
- <p>Drag to rotate the globe. Scrub the timeline to travel through decades of global data, from city growth to night-time light.</p>
- <div class="stats">
+ <div id="heroDefault">
+  <div class="eyebrow mono">// INTERACTIVE EARTH ARCHIVE</div>
+  <h1>See the world<br>change, <span>day<br>by day.</span></h1>
+  <p>Drag to rotate the globe. Scrub the timeline to travel through decades of global data, from city growth to night-time light.</p>
+ </div>
+ <div id="heroLocation" style="display:none">
+  <div class="eyebrow mono">// LOCATION</div>
+  <h1 id="locHeroTitle">—</h1>
+  <p id="locHeroDesc">—</p>
+ </div>
+ <div class="stats" id="statsGlobal">
   <div class="stat"><small class="mono">ACTIVE REGIONS</small><div><span id="sRegions">0</span><em id="sDelta">+0%</em></div></div>
   <div class="stat"><small class="mono">DATA POINTS</small><div id="sPoints">0</div></div>
   <div class="stat"><small class="mono">CITIES TRACKED</small><div id="sCities">0</div></div>
-  <div class="stat"><small class="mono">YEARS</small><div id="sYears" style="white-space:nowrap;font-size:22px">1990–2026</div></div>
+  <div class="stat"><small class="mono">YEARS</small><div id="sYears" style="white-space:nowrap;font-size:22px">1900–2026</div></div>
+ </div>
+ <div class="stats" id="statsLocation" style="display:none">
+  <div class="stat"><small class="mono">POPULATION</small><div><span id="locPop">—</span><em id="locCountry"></em></div></div>
+  <div class="stat"><small class="mono">TIMEZONE</small><div id="locTz">—</div></div>
+  <div class="stat"><small class="mono">SURFACE</small><div id="locSurface">—</div></div>
+  <div class="stat"><small class="mono">CONTINENT</small><div id="locContinent" style="font-size:16px">—</div></div>
  </div>
  <button class="aibtn" id="openChat">
   <span class="av"></span>
@@ -70,6 +84,13 @@
  <button class="zb" id="zOut" title="Zoom out">−</button><span class="zl mono" id="zLbl">1.0×</span><button class="zb" id="zIn" title="Zoom in">+</button>
  <button class="zb" id="zReset" title="Reset view">⟲</button>
 </div>
+<section class="eras" id="eras">
+ <button class="erasTab mono" id="erasTab">▲ HISTORICAL ERAS</button>
+ <div class="erasWrap" id="erasWrap">
+  <div class="erasRow" id="erasRow"></div>
+  <div class="erasNote mono">This context strip spans all of history — the globe's live archive data covers 1990–2026.</div>
+ </div>
+</section>
 <section class="time">
  <div class="hd mono"><span>◷ TIMELINE</span>
   <div class="play"><span class="spd" id="spd">1 DAY / TICK</span>
@@ -79,8 +100,8 @@
  <div class="sl">
   <div class="row mono"><span>YEAR</span><b id="yLbl">2018</b></div>
   <div class="hist" id="hist"></div>
-  <input type="range" id="year" min="1990" max="2026" value="2018">
-  <div class="ticks big mono"><span>1990</span><span>2000</span><span>2010</span><span>2020</span><span>2026</span></div>
+  <input type="range" id="year" min="1900" max="2026" value="2018">
+  <div class="ticks big mono" id="yearTicks"><span>1900</span><span>1950</span><span>2000</span><span>2026</span></div>
  </div>
  <div class="sep"></div>
  <div class="sub">
@@ -102,6 +123,10 @@
 <script src="src/vendor/topojson-client.min.js"></script>
 <script src="src/data/topo110m.js"></script>
 <script src="src/data/topo50m.js"></script>
+<script src="src/data/topoStates110m.js"></script>
+<script src="src/data/topoStates50m.js"></script>
+<script src="src/data/countryInfo.js"></script>
+<script src="src/data/places.js"></script>
 <script src="src/js/app.js"></script>
 </body>
 </html>
