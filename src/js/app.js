@@ -17,7 +17,10 @@ const MONTHS=["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV",
 const MONTHS_LONG=["January","February","March","April","May","June","July","August","September","October","November","December"];
 const DOW=["SUN","MON","TUE","WED","THU","FRI","SAT"];
 function hash(str){let h=2166136261;for(let i=0;i<str.length;i++){h^=str.charCodeAt(i);h=Math.imul(h,16777619)}return ((h>>>0)%100000)/100000}
-const yearT=y=>(y-1990)/36;
+// clamped here (not at each call site) since the timeline can now scrub to historical/BCE years
+// via the era strip, far outside the archive's real 1990-2026 sample-data range; Math.pow() below
+// would otherwise NaN on a negative t.
+const yearT=y=>(Math.max(1990,Math.min(2026,y))-1990)/36;
 function lightIndex(c,d){
   const t=yearT(d.y+(d.m-1)/12);
   const growth=Math.min(1,c.base*(0.55+0.45*Math.pow(t,0.8)*c.g+0.12*t));
@@ -55,7 +58,12 @@ function eventFor(d){
    ===================================================================== */
 const S={y:2018,m:6,d:14};
 const $=id=>document.getElementById(id);
-const dim=(y,m)=>new Date(y,m,0).getDate();
+// new Date(y,...) silently adds 1900 to any y in [0,99], so build via setFullYear instead —
+// matters here since the timeline now reaches historical (even BCE, as negative y) dates.
+function makeDate(y,m,d){const dt=new Date(0,m-1,d);dt.setFullYear(y);return dt}
+const dim=(y,m)=>{const dt=new Date(0,m,0);dt.setFullYear(y);return dt.getDate()};
+const clampYear=y=>Math.max(1990,Math.min(2026,y));
+const yearStr=y=>y<0?`${-y} BCE`:y<1000?`${y} CE`:`${y}`;
 
 /* =====================================================================
    GLOBE v3 — 2D canvas, deep zoom.
@@ -90,8 +98,21 @@ function loadGeo(r){if(GEO[r]||!TOPO[r])return;const t=TOPO[r];
   // a few tiny 10m islands have reversed winding (they'd fill the whole sphere): flip them
   for(const f of land.features){const g=f.geometry;if(g.type!=="MultiPolygon")continue;
     g.coordinates=g.coordinates.map(poly=>d3.geoArea({type:"Polygon",coordinates:poly})>2*Math.PI?poly.map(ring=>ring.slice().reverse()):poly)}
-  GEO[r]={land,borders:topojson.mesh(t,t.objects.countries,(a,b)=>a!==b)};}
+  GEO[r]={land,borders:topojson.mesh(t,t.objects.countries,(a,b)=>a!==b),countries:topojson.feature(t,t.objects.countries)};}
 loadGeo("110m");loadGeo("50m");
+let activeRes="110m";
+
+/* ---------- state/province borders (separate, self-contained topology) ---------- */
+const GEO_STATES={};
+function loadStatesGeo(key){if(GEO_STATES[key]||!TOPO[key])return;const t=TOPO[key];
+  GEO_STATES[key]={features:topojson.feature(t,t.objects.states).features,mesh:topojson.mesh(t,t.objects.states,(a,b)=>a!==b)};}
+loadStatesGeo("110m_states");loadStatesGeo("50m_states");
+const statesKeyFor=res=>res==="110m"?"110m_states":"50m_states";
+function featureAt(features,lon,lat){
+  if(!features)return null;
+  for(let i=0;i<features.length;i++) if(d3.geoContains(features[i],[lon,lat])) return features[i];
+  return null;
+}
 let hiResLoading=false;
 function requestHiRes(){ // 10m data is large: only fetched when the user zooms in deep
   if(GEO["10m"]||hiResLoading)return;hiResLoading=true;
@@ -197,6 +218,7 @@ function selectCity(c,fly=true){
   selected=c;CITIES.forEach(k=>k.el.classList.toggle("sel",k===c));
   document.querySelectorAll(".region").forEach(r=>r.classList.toggle("sel",r.dataset.n===c?.name));
   if(c&&fly) flyTo(c.lat,c.lon);
+  if(c) showLocationInfo(c.lat,c.lon); else hideLocationInfo();
 }
 function flyTo(lat,lon,zoom){view.tLat=clamp(view.z>1.5?lat:lat*0.85,-85,85);view.tLon=lon;if(zoom)view.tz=zoom;wclear()}
 
@@ -263,21 +285,89 @@ function stepWind(){
   buckets.forEach((b,i)=>{wctx.strokeStyle=WCOL[i];wctx.stroke(b)});
 }
 
+/* ---------- location info (left panel): population + timezone, bundled static dataset ---------- */
+const tzLabel=lon=>{const off=Math.round(lon/15);return `UTC${off>=0?"+":""}${off}`};
+const popForYear=(pop2019,year)=>Math.round(pop2019*Math.pow(1.011,year-2019)); // ~1.1%/yr placeholder global growth
+function countryInfoAt(lat,lon){
+  const geo=GEO[activeRes]||GEO["110m"];
+  const f=geo.countries?featureAt(geo.countries.features,lon,lat):null;
+  if(!f)return null;
+  const info=COUNTRY_INFO[f.id]||COUNTRY_INFO[f.properties.name];
+  return {name:f.properties.name,info};
+}
+function stateInfoAt(lat,lon){
+  const sg=GEO_STATES["50m_states"]||GEO_STATES["110m_states"];
+  return sg?featureAt(sg.features,lon,lat):null;
+}
+function nearestCity(lat,lon){
+  // searches the full ~7,300-place world dataset (src/data/places.js), not just the 18
+  // demo CITIES used for the light-index simulation — so e.g. a click in Washington state
+  // finds Tacoma, not whichever of the 18 happens to be least-far-away.
+  const p=vec(lat,lon);let best=null,bestDot=-2;
+  for(const place of PLACES){
+    const q=vec(place[1],place[2]);
+    const dot=p.x*q.x+p.y*q.y+p.z*q.z;
+    if(dot>bestDot){bestDot=dot;best=place}
+  }
+  return {city:{name:best[0]},km:Math.round(Math.acos(clamp(bestDot,-1,1))*6371)};
+}
+function showLocationInfo(lat,lon){
+  const ci=countryInfoAt(lat,lon), land=landAt(lat,lon), st=stateInfoAt(lat,lon);
+  $("statsGlobal").style.display="none";$("statsLocation").style.display="grid";
+  $("heroDefault").style.display="none";$("heroLocation").style.display="block";
+  const countryName=ci?ci.name:(st?st.properties.admin:null);
+  // the growth-rate model only compounds sensibly within a few centuries of its ~2019 base
+  // figure; far enough back (BCE/early-CE eras) it decays to an absurd near-zero number, so
+  // treat anything below a sane floor as "not modeled" rather than showing a fake "0"
+  const popRaw=ci&&ci.info?popForYear(ci.info[1],S.y):null;
+  const pop=popRaw&&popRaw>=1000?popRaw:null;
+  if(ci&&ci.info){
+    $("locPop").textContent=pop?fmt(pop):"—";
+    $("locCountry").textContent=ci.name;
+    $("locContinent").textContent=ci.info[2];
+  }else{
+    $("locPop").textContent="—";$("locCountry").textContent="";
+    $("locContinent").textContent=land?"Unclaimed":"Ocean region";
+  }
+  $("locTz").textContent=tzLabel(lon);
+  $("locSurface").textContent=land?"Land":"Ocean";
+  if(st){
+    $("locHeroTitle").innerHTML=`${st.properties.name}<br><span>${countryName||st.properties.admin||""}</span>`;
+  }else if(countryName){
+    $("locHeroTitle").innerHTML=countryName;
+  }else{
+    $("locHeroTitle").innerHTML=land?"Unclaimed Territory":"Open Ocean";
+  }
+  const bits=[];
+  if(pop)bits.push(`Population ~${fmt(pop)} (country-wide, ${yearStr(S.y)} est.)`);
+  else if(ci&&ci.info)bits.push(`Population not modeled this far back`);
+  bits.push(`Timezone ${tzLabel(lon)}`);
+  bits.push(land?"Landmass":"Ocean region");
+  if(ci&&ci.info)bits.push(ci.info[2]);
+  $("locHeroDesc").textContent=bits.join(" · ");
+}
+function hideLocationInfo(){
+  $("statsGlobal").style.display="grid";$("statsLocation").style.display="none";
+  $("heroDefault").style.display="block";$("heroLocation").style.display="none";
+}
+
 /* ---------- probe marker (click anywhere, like earth's location readout) ---------- */
 let probe=null;
 const dirName=a=>["N","NE","E","SE","S","SW","W","NW"][Math.round(((a%360)+360)%360/45)%8];
 function setProbe(lon,lat){
   probe={lon,lat,v:vec(lat,lon)};
   const [u,v]=windAt(lon,lat),sp=Math.hypot(u,v)*3.6,from=(Math.atan2(-u,-v)/D2R+360)%360;
-  const land=landAt(lat,lon), li=lightAt(lat,lon);
+  const land=landAt(lat,lon), li=lightAt(lat,lon), nc=nearestCity(lat,lon);
   $("probeCard").innerHTML=`<div class="pc-h mono"><span>${Math.abs(lat).toFixed(2)}°${lat>=0?"N":"S"} ${Math.abs(lon).toFixed(2)}°${lon>=0?"E":"W"}</span><button class="pc-x" onclick="clearProbe()">×</button></div>
+   <div class="pc-r"><span class="mono">NEAREST CITY</span><b>${nc.city.name}</b><i>${fmt(nc.km)} km</i></div>
    <div class="pc-r"><span class="mono">WIND</span><b>${sp.toFixed(0)} km/h</b><i>from ${dirName(from)} ${from.toFixed(0)}°</i></div>
    <div class="pc-r"><span class="mono">SURFACE</span><b>${land?"Land":"Ocean"}</b></div>
    <div class="pc-r"><span class="mono">LIGHT IDX</span><b>${li.toFixed(2)}</b><div class="pc-bar"><i style="width:${li*100}%"></i></div></div>
    <div class="pc-f mono">SAMPLE DATA · ${MONTHS[S.m-1]} ${S.d} ${S.y}</div>`;
   $("probe").style.display="block";
+  showLocationInfo(lat,lon);
 }
-function clearProbe(){probe=null;$("probe").style.display="none"}
+function clearProbe(){probe=null;$("probe").style.display="none";hideLocationInfo()}
 window.clearProbe=clearProbe;
 
 /* ---------- interaction ---------- */
@@ -296,6 +386,29 @@ canvas.addEventListener("pointerup",e=>{
   }
   drag=null;downAt=null;canvas.classList.remove("drag")});
 canvas.addEventListener("pointercancel",()=>{drag=null;canvas.classList.remove("drag")});
+
+/* ---------- hover highlight + tooltip for country / state outlines ---------- */
+let hoverCountry=null,hoverState=null,lastHoverCheck=0;
+const geoTip=$("geoTip");
+canvas.addEventListener("pointermove",e=>{
+  if(!drag)geoTip.style.transform=`translate(${e.clientX+16}px,${e.clientY+18}px)`;
+  if(drag||!LAYERS.borders)return;
+  const now=performance.now();if(now-lastHoverCheck<70)return;lastHoverCheck=now;
+  const ll=invert(e.clientX*QUALITY,e.clientY*QUALITY);
+  let hc=null,hs=null;
+  if(ll){
+    const geo=GEO[activeRes]||GEO["110m"];
+    hc=geo.countries?featureAt(geo.countries.features,ll[0],ll[1]):null;
+    const sg=GEO_STATES["50m_states"]||GEO_STATES["110m_states"];if(sg)hs=featureAt(sg.features,ll[0],ll[1]);
+  }
+  if(hc!==hoverCountry||hs!==hoverState){
+    hoverCountry=hc;hoverState=hs;needsRedraw=true;
+    if(hs){geoTip.innerHTML=`<b>${hs.properties.name}</b><br>${hs.properties.admin||(hc?hc.properties.name:"")}`;geoTip.classList.add("show")}
+    else if(hc){geoTip.innerHTML=`<b>${hc.properties.name}</b>`;geoTip.classList.add("show")}
+    else geoTip.classList.remove("show");
+  }
+});
+canvas.addEventListener("pointerleave",()=>{if(hoverCountry||hoverState){hoverCountry=hoverState=null;needsRedraw=true}geoTip.classList.remove("show")});
 function zoomBy(f,mx,my){
   const nz=clamp(view.tz*f,ZMIN,ZMAX);
   if(mx!=null){ // zoom toward the cursor: nudge the view centre toward the point under it
@@ -355,7 +468,7 @@ function drawDots(t,alpha,lightsOnly){
 
 /* cached vector map layer: only re-projected when the view actually changes */
 const mapCv=document.createElement("canvas"),mctx=mapCv.getContext("2d");let mapKey="";
-function buildMap(geo,Z,htA){
+function buildMap(geo,Z,htA,res){
   if(mapCv.width!==W||mapCv.height!==H){mapCv.width=W;mapCv.height=H}
   mctx.globalCompositeOperation="source-over";mctx.clearRect(0,0,W,H);mctx.globalCompositeOperation="lighter";
   projection.clipExtent(null);
@@ -379,8 +492,19 @@ function buildMap(geo,Z,htA){
   const coastA=0.15+0.65*smoothstep(1,2.2,Z);
   mctx.lineJoin="round";mctx.strokeStyle=`rgba(95,216,255,${coastA*.22})`;mctx.lineWidth=4*QUALITY;mctx.stroke(landP);
   mctx.strokeStyle=`rgba(160,235,255,${coastA})`;mctx.lineWidth=1.1*QUALITY;mctx.stroke(landP);
-  if(LAYERS.borders){const bA=smoothstep(1.4,3,Z)*.45;if(bA>0.01){
-    mctx.setLineDash([4*QUALITY,3*QUALITY]);mctx.strokeStyle=`rgba(120,200,255,${bA})`;mctx.lineWidth=.8*QUALITY;mctx.stroke(P2(geo.borders));mctx.setLineDash([])}}
+  if(LAYERS.borders){
+    const bA=0.06+0.32*smoothstep(1,3,Z);
+    mctx.setLineDash([4*QUALITY,3*QUALITY]);mctx.strokeStyle=`rgba(120,200,255,${bA})`;mctx.lineWidth=.8*QUALITY;mctx.stroke(P2(geo.borders));mctx.setLineDash([]);
+    if(Z>2){
+      const sg=GEO_STATES[statesKeyFor(res)];
+      if(sg){
+        const sA=smoothstep(2,4,Z)*.3;
+        mctx.setLineDash([3*QUALITY,2*QUALITY]);mctx.strokeStyle=`rgba(150,225,255,${sA})`;mctx.lineWidth=.6*QUALITY;mctx.stroke(P2(sg.mesh));mctx.setLineDash([]);
+        if(hoverState){mctx.strokeStyle="rgba(255,255,255,.85)";mctx.lineWidth=1.3*QUALITY;mctx.stroke(P2(hoverState))}
+      }
+    }
+    if(hoverCountry){mctx.strokeStyle="rgba(255,255,255,.95)";mctx.lineWidth=1.7*QUALITY;mctx.stroke(P2(hoverCountry))}
+  }
 }
 function drawGlobe(t){
   setRot();
@@ -390,6 +514,7 @@ function drawGlobe(t){
   let res=Z<2.2||moving?"110m":"50m";
   if(Z>7&&!moving){requestHiRes();if(GEO["10m"])res="10m"}
   const geo=GEO[res]||GEO["110m"];
+  activeRes=res;
   const dotA=1-smoothstep(1.25,2.1,Z), htA=1-dotA;
   ctx.globalCompositeOperation="source-over";ctx.clearRect(0,0,W,H);
   // body + fresnel rim
@@ -409,8 +534,9 @@ function drawGlobe(t){
   ctx.fillStyle=bg;ctx.fillRect(0,by-bh,W,2*bh);ctx.restore();
   // land: sphere dots at low zoom, cross-fading to the cached vector map at high zoom
   if(dotA>0.01)drawDots(t,dotA,false);
-  const key=[view.lon.toFixed(2),view.lat.toFixed(2),Z.toFixed(3),res,LAYERS.grid,LAYERS.borders,W,H].join("|");
-  if(key!==mapKey){buildMap(geo,Z,htA);mapKey=key}
+  const key=[view.lon.toFixed(2),view.lat.toFixed(2),Z.toFixed(3),res,LAYERS.grid,LAYERS.borders,W,H,
+    hoverCountry?hoverCountry.id:"",hoverState?hoverState.properties.name:""].join("|");
+  if(key!==mapKey){buildMap(geo,Z,htA,res);mapKey=key}
   ctx.drawImage(mapCv,0,0);
   if(htA>0.01&&LAYERS.lights)drawDots(t,htA,true);
   ctx.globalCompositeOperation="source-over";
@@ -460,22 +586,83 @@ function frame(now){
    ===================================================================== */
 const yearEl=$("year"),monthEl=$("month"),dayEl=$("day");
 const hist=$("hist");
-for(let y=1990;y<=2026;y++){const i=document.createElement("i");const s=stats({y,m:6,d:15});i.style.height=(18+82*(s.regions-380)/(1290-380))+"%";i.title=y;i.onclick=()=>{S.y=y;update()};hist.appendChild(i)}
+// default range matches the "Modern" era card (1900-Today) below, so the dial and the era
+// strip agree from first load instead of the dial showing its own separate 1990-2026 default
+let yearMin=1900,yearMax=2026;
+function rebuildHist(min,max){
+  hist.innerHTML="";
+  const span=max-min,bars=Math.max(1,Math.min(span,40)),stepSize=Math.max(1,Math.round(span/bars));
+  for(let y=min;y<=max;y+=stepSize){
+    const i=document.createElement("i");
+    const s=stats({y:clampYear(y),m:6,d:15});
+    i.style.height=(18+82*(s.regions-380)/(1290-380))+"%";
+    i.title=yearStr(y);i.dataset.y=y;
+    i.onclick=()=>{S.y=y;update()};
+    hist.appendChild(i);
+  }
+}
+function niceStep(raw){
+  if(raw<=0)return 1;
+  const mag=Math.pow(10,Math.floor(Math.log10(raw)));
+  for(const n of [1,2,5,10])if(raw<=n*mag)return n*mag;
+  return 10*mag;
+}
+function rebuildTicks(min,max){
+  const el=$("yearTicks");if(!el)return;el.innerHTML="";
+  const step=niceStep((max-min)/4);
+  const ticks=[min];let y=min+step;
+  while(y<max){ticks.push(y);y+=step}
+  ticks.push(max);
+  el.innerHTML=ticks.map(y=>`<span>${yearStr(y)}</span>`).join("");
+}
+rebuildHist(yearMin,yearMax);rebuildTicks(yearMin,yearMax);
+
+/* ---------- historical era strip: clicking an era re-scopes the whole year dial to its real range ---------- */
+const ERAS=[
+  {k:"ANCIENT",range:"3000 BCE – 500 BCE",event:"Pyramids of Giza · c. 2500 BCE",ymin:-3000,ymax:-500,anchor:-2500,
+   icon:'<svg viewBox="0 0 24 24"><path d="M12 4 L21 20 H3 Z"/><path d="M8 20 V15 M12 20 V11 M16 20 V15"/></svg>'},
+  {k:"CLASSICAL",range:"500 BCE – 500 CE",event:"Fall of the Western Roman Empire · 476 CE",ymin:-500,ymax:500,anchor:476,
+   icon:'<svg viewBox="0 0 24 24"><path d="M4 9 L12 4 L20 9 M3 20 H21 M5 9 V20 M9 9 V20 M15 9 V20 M19 9 V20"/></svg>'},
+  {k:"MEDIEVAL",range:"500 – 1500",event:"Magna Carta Signed · 1215",ymin:500,ymax:1500,anchor:1215,
+   icon:'<svg viewBox="0 0 24 24"><path d="M4 21 V11 H8 V21 M16 21 V11 H20 V21 M8 17 H16 M5 11 V7 H6.5 V11 M17.5 11 V7 H19 V11 M9.5 11 L12 5 L14.5 11"/></svg>'},
+  {k:"RENAISSANCE",range:"1500 – 1700",event:"Printing Press Invented · c. 1450",ymin:1500,ymax:1700,anchor:1600,
+   icon:'<svg viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="8" ry="6"/><circle cx="9" cy="10.5" r=".8"/><circle cx="14.5" cy="9.5" r=".8"/><circle cx="15" cy="13.5" r=".8"/><circle cx="10" cy="14.5" r=".8"/></svg>'},
+  {k:"INDUSTRIAL",range:"1700 – 1900",event:"Steam Engine Developed · c. 1769",ymin:1700,ymax:1900,anchor:1769,
+   icon:'<svg viewBox="0 0 24 24"><path d="M3 20 H21 M5 20 V12 H19 V20 M8 12 V8 H10 V12 M13 12 V7 H15 V12 M5 15 H19 M3 9 L5.5 6.5"/></svg>'},
+  {k:"MODERN",range:"1900 – Today",event:"Moon Landing · 1969",ymin:1900,ymax:2026,anchor:1969,
+   icon:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><path d="M4.5 10 H19.5 M4.5 14 H19.5 M12 5 C9 8 9 16 12 19 C15 16 15 8 12 5Z"/></svg>'},
+];
+const erasRow=$("erasRow");
+erasRow.innerHTML=ERAS.map((e,i)=>`<button class="era mono" data-i="${i}">${e.icon}<b>${e.k}</b><span class="rng">${e.range}</span><span class="evt">${e.event}</span></button>`).join("");
+erasRow.querySelectorAll(".era").forEach(b=>b.onclick=()=>{
+  const e=ERAS[+b.dataset.i];
+  yearMin=e.ymin;yearMax=e.ymax;yearEl.min=yearMin;yearEl.max=yearMax;
+  rebuildHist(yearMin,yearMax);rebuildTicks(yearMin,yearMax);
+  S.y=e.anchor;update();
+});
+function markEra(){
+  let idx=ERAS.findIndex(e=>S.y>=e.ymin&&S.y<=e.ymax);
+  if(idx<0)idx=S.y<ERAS[0].ymin?0:ERAS.length-1;
+  erasRow.querySelectorAll(".era").forEach((b,i)=>b.classList.toggle("now",i===idx));
+}
+const erasTab=$("erasTab"),erasWrap=$("erasWrap");let erasOpen=false;
+erasTab.onclick=()=>{erasOpen=!erasOpen;erasWrap.classList.toggle("open",erasOpen);erasTab.textContent=(erasOpen?"▼":"▲")+" HISTORICAL ERAS"};
 function setFill(el){el.style.setProperty("--p",((el.value-el.min)/(el.max-el.min)*100)+"%")}
 function fmt(n){return n.toLocaleString("en-US")}
 function update(){
   S.d=Math.min(S.d,dim(S.y,S.m));
-  yearEl.value=S.y;monthEl.value=S.m;dayEl.max=dim(S.y,S.m);dayEl.value=S.d;$("dMax").textContent=dayEl.max;
+  yearEl.min=yearMin;yearEl.max=yearMax;yearEl.value=S.y;monthEl.value=S.m;dayEl.max=dim(S.y,S.m);dayEl.value=S.d;$("dMax").textContent=dayEl.max;
   [yearEl,monthEl,dayEl].forEach(setFill);
-  $("yLbl").textContent=S.y;$("mLbl").textContent=MONTHS[S.m-1];$("dLbl").textContent=S.d;
-  $("dateTxt").textContent=`${MONTHS_LONG[S.m-1]} ${S.d}, ${S.y}`;
-  $("dow").textContent=DOW[new Date(S.y,S.m-1,S.d).getDay()];
-  $("ctx").textContent=`CONTEXT · ${MONTHS[S.m-1]} ${S.d} ${S.y}`;
-  [...hist.children].forEach((b,i)=>b.classList.toggle("a",1990+i===S.y));
+  $("yLbl").textContent=yearStr(S.y);$("mLbl").textContent=MONTHS[S.m-1];$("dLbl").textContent=S.d;
+  $("dateTxt").textContent=`${MONTHS_LONG[S.m-1]} ${S.d}, ${yearStr(S.y)}`;
+  $("dow").textContent=DOW[makeDate(S.y,S.m,S.d).getDay()];
+  $("ctx").textContent=`CONTEXT · ${MONTHS[S.m-1]} ${S.d} ${yearStr(S.y)}`;
+  [...hist.children].forEach(b=>b.classList.toggle("a",+b.dataset.y===S.y));
+  markEra();
   const st=stats(S);
   $("sRegions").textContent=fmt(st.regions);
   const de=$("sDelta");de.textContent=(st.delta>=0?"+":"")+st.delta.toFixed(0)+"%";de.classList.toggle("neg",st.delta<0);
-  $("sPoints").textContent=st.points.toFixed(1)+"M";$("sCities").textContent=fmt(st.cities);$("sYears").textContent=`1990–${S.y}`;
+  $("sPoints").textContent=st.points.toFixed(1)+"M";$("sCities").textContent=fmt(st.cities);$("sYears").textContent=`${yearStr(yearMin)}–${yearStr(yearMax)}`;
   buildWind(S);G.growth=0.35+0.65*yearT(S.y+(S.m-1)/12);
   // regions
   const vals=CITIES.map(c=>({c,v:lightIndex(c,S)})).sort((a,b)=>b.v-a.v).slice(0,5);
@@ -484,6 +671,7 @@ function update(){
   box.querySelectorAll(".region").forEach(r=>r.onclick=()=>selectCity(CITIES.find(c=>c.name===r.dataset.n)));
   CITIES.forEach(c=>c.el.querySelector(".tag").textContent=
     c===eventCity?`◆ ${c.name.toUpperCase()} · ${currentEvent?.type.k.split(" ")[0]}`:`${c.name.toUpperCase()} · ${Math.abs(c.lat).toFixed(1)}°${c.lat>=0?"N":"S"} · LI ${lightIndex(c,S).toFixed(2)}`);
+  if(probe)showLocationInfo(probe.lat,probe.lon);
   onDateChange();
 }
 yearEl.oninput=()=>{S.y=+yearEl.value;update()};
@@ -492,7 +680,7 @@ dayEl.oninput=()=>{S.d=+dayEl.value;update()};
 
 // play controls
 const SPEEDS=[[1,"1 DAY"],[7,"1 WEEK"],[30,"1 MONTH"],[365,"1 YEAR"]];let spd=0,playing=null;
-function step(days){const dt=new Date(S.y,S.m-1,S.d+days);let y=dt.getFullYear();if(y>2026||y<1990){stop();return}S.y=y;S.m=dt.getMonth()+1;S.d=dt.getDate();update()}
+function step(days){const dt=makeDate(S.y,S.m,S.d+days);let y=dt.getFullYear();if(y>yearMax||y<yearMin){stop();return}S.y=y;S.m=dt.getMonth()+1;S.d=dt.getDate();update()}
 function stop(){clearInterval(playing);playing=null;$("playBtn").classList.remove("on");$("playBtn").textContent="▶"}
 $("playBtn").onclick=()=>{if(playing)return stop();playing=setInterval(()=>step(SPEEDS[spd][0]),180);$("playBtn").classList.add("on");$("playBtn").textContent="❚❚"};
 $("fwd").onclick=()=>{spd=(spd+1)%SPEEDS.length;$("spd").textContent=SPEEDS[spd][1]+" / TICK"};
